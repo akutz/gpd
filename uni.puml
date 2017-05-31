@@ -1,0 +1,14 @@
+@startuml
+
+autonumber "<b>[000]"
+
+A -> B: **A** imports and loads **B**
+A -> C: **A** imports and loads **C**
+A -> D: **A** imports and loads **D**
+
+A -> C: **A** looks up **C**'s ""Types"" symbol, \na ""map[string]func()interface{}""
+A -> A: **A** iterates **C**'s type map, \nregistering **C**'s types with\n**B**'s type registry, including\na type that satisfies the\n""HelloWorld"" interface
+
+D -> B: **D** asks **B**'s type registry for a\nnew object instance that satisfies \nthe ""HelloWorld"" interface
+
+@enduml

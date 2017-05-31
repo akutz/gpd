@@ -6,20 +6,24 @@ import (
 	"context"
 	"fmt"
 	"os"
-
-	"github.com/akutz/gpd/dep"
-	"github.com/akutz/gpd/lib"
 )
+
+// Types is the symbol the host process uses to
+// retrieve the plug-in's type map
+var Types = map[string]func() interface{}{
+	"mod_go": func() interface{} { return &module{} },
+}
 
 type module struct{}
 
-func init() {
-	lib.RegisterModule("mod_go", func() lib.Module {
-		return &module{}
-	})
-}
+func (m *module) Init(ctx context.Context, configObj interface{}) error {
 
-func (m *module) Init(ctx context.Context, config dep.Config) {
-	fmt.Fprintln(os.Stdout, "Yes there were thirty, thousand, pounds...")
-	fmt.Fprintln(os.Stdout, "Of...bananas.")
+	config, configOk := configObj.(Config)
+	if !configOk {
+		return errInvalidConfig
+	}
+
+	fmt.Fprintf(os.Stdout, "%T\n", config)
+	fmt.Fprintln(os.Stdout, config.Get(ctx, "bananas"))
+	return nil
 }

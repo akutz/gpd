@@ -2,8 +2,6 @@ package lib
 
 import (
 	"context"
-
-	"github.com/akutz/gpd/dep"
 )
 
 // Module is the interface implementated by types that
@@ -11,19 +9,26 @@ import (
 type Module interface {
 
 	// Init initializes the module.
-	Init(ctx context.Context, config dep.Config)
+	//
+	// The config argument can be asserted as an implementation of the
+	// of the github.com/akutz/gpd/lib/v2.Config interface or older.
+	Init(ctx context.Context, config interface{}) error
 }
 
-var mods = map[string]func() Module{}
+var mods = map[string]func() interface{}{}
 
 // RegisterModule registers a new module with its name and function
-// that returns a new, uninitialized instance of the module type.
-func RegisterModule(name string, ctor func() Module) {
+// that returns a new, uninitialized object that can be asserted
+// as the Module interface.
+func RegisterModule(name string, ctor func() interface{}) {
 	mods[name] = ctor
 }
 
 // NewModule instantiates a new instance of the module type with the
 // specified name.
 func NewModule(name string) Module {
-	return mods[name]()
+	if obj, ok := mods[name]().(Module); ok {
+		return obj
+	}
+	return nil
 }

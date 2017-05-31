@@ -1,0 +1,14 @@
+@startuml
+
+autonumber "<b>[000]"
+
+A -> B: **A** imports and loads **B**
+
+A -> C: **A** imports and loads **C**
+C -> B: **C**'s ""init"" function registers an\nimplementation of the ""HelloWorld""\ninterface with **B**'s type registery
+
+A -> D: **A** imports and loads **D**
+
+D -> B: **D** asks **B**'s type registry for a new \nobject instance that satisfies \nthe ""HelloWorld"" interface
+
+@enduml

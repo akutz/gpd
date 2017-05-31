@@ -1,196 +1,291 @@
-# Go Plug-ins & Vendored Dependencies ([\#20481](https://github.com/golang/go/issues/20481))
-With the release of Go 1.8 came a feature long-sought by many developers --
-support for modular plug-ins loadable at runtime. While Go plug-ins do have
-some limitations today -- primarily being Linux only at this time -- they
-are still incredibly useful.
+# Go Plug-ins & Vendored Dependencies: A Solution
+This document outlines a solution for the problem described in
+[golang/go#20481](https://github.com/golang/go/issues/20481). Please
+review the original problem description before continuing.
 
-Unless a project has vendored dependencies that is.
+The problem was fairly straight-forward and ultimately so is the solution:
+a Go plug-in cannot depend on a host process's symbols. That means:
+* Go plug-ins must use a unidirectional model for type registration
+* Go plug-ins must use `interface{}` for all non-stdlib types involved
+in ingress and egress host-plug-in communications
 
-The utility of Go plug-ins is almost completely erased by fact that many
-Go projects rely on vendored dependencies in order to ensure consistent
-build results.
+## Unidirectional Model
+Go supports the dependency inversion principle
+([DIP](https://en.wikipedia.org/wiki/Dependency_inversion_principle))
+through the use of interface abstractions, but there still must
+exist a mechanism to provide implementations of the abstractions on
+which a program depends. One such solution can be found in the list
+of suggested implementations of inversion of control
+([IoC](https://en.wikipedia.org/wiki/Inversion_of_control)): the
+[service locator pattern](https://en.wikipedia.org/wiki/Service_locator_pattern).
 
-## The Problem
-The problem is pretty straight-forward. When an application (`app`)
-vendors a library (`lib`), the package path of the library is now
-`path/to/app/vendor/path/to/lib`. However, the plug-in is likely
-built against either `path/to/lib` or, if the plug-in vendors
-dependencies as well, `path/to/plugin/vendor/path/to/lib`.
+The service locator pattern is very easy to implement in Go as a simple
+type registry. Consumers that require an implementation of some interface
+are able to query the type registry and receive an object instance that
+fulfills the abstraction. There are two models that can be used to
+prime the registry with types: bidirectional and unidirectional.
 
-This of course makes total sense and behaves exactly as one would
-expect with regards to Go packages. Despite the intent, these three
-packages are *not* the same:
+![Bidirectional Relationship](http://svgshare.com/i/1nf.svg "Bidirectional Relationship")
 
-* `path/to/lib`
-* `path/to/app/vendor/path/to/lib`
-* `path/to/plugin/vendor/path/to/lib`
+The above diagram is an example of the bidirectional model, but it fails
+when used in concert with Go plug-ins due to the issues with dependencies
+outlined in [golang/go#20481](https://github.com/golang/go/issues/20481). The
+solution is a unidirectional model:
 
-While the behavior is consistent with regards to Go packages, it
-flies in the face of the utility provided by a combination of
-vendored dependencies and the new Go plug-in model.
+![Unidirectional Relationship](http://svgshare.com/i/1n0.svg "Unidirectional Relationship")
 
-## Reproduction
-This project makes it easy to reproduce the above issue.
+Illustrated in the diagram above, the unidirectional model provides the same
+type registry that the bidirectional model does but relocates type registration
+from the plug-ins' `init` functions to the host process. This change means the
+plug-ins no longer depend on the type registry in the host process, and that's
+very important because a plug-in cannot depend on a host process's symbols.
 
-### Requirements
-To reproduce this issue Go 1.8.x and a Linux host are required:
+## Interface In / Interface Out
+Go interfaces are really powerful, but they are also quick to cause issues when
+used with plug-ins for two reasons:
 
-```bash
-$ go version
-go version go1.8.1 linux/amd64
+1. Interface equality is not as simple as it seems
+2. The fully-qualified path to an interface matters
+
+### Interface Equality
+The following examples demonstrate the power and peril of using Go
+interfaces interchangeably having assumed equality. The first example
+defines two, identical interfaces, `dog` and `fox`, and two structs,
+best friends that implement the interfaces, `copper` and `todd`
+([run example](https://play.golang.org/p/4fZRGr2qgj)):
+
+```go
+package main
+
+import (
+	"fmt"
+)
+
+type dog interface {
+	bark() string
+}
+
+type fox interface {
+	bark() string
+}
+
+type copper struct{}
+
+func (c *copper) bark() string { return "woof!" }
+
+type todd struct{}
+
+func (t *todd) bark() string { return "woof!" }
+
+func barkWithDog(d dog) { fmt.Println(d.bark()) }
+func barkWithFox(f fox) { fmt.Println(f.bark()) }
+
+func main() {
+	var d dog = &copper{}
+	var f fox = &todd{}
+	barkWithDog(d)
+	barkWithFox(f)
+}
 ```
 
-```bash
-$ go env
-GOARCH="amd64"
-GOBIN=""
-GOEXE=""
-GOHOSTARCH="amd64"
-GOHOSTOS="linux"
-GOOS="linux"
-GOPATH="/home/akutz/go"
-GORACE=""
-GOROOT="/home/akutz/.go/1.8.1"
-GOTOOLDIR="/home/akutz/.go/1.8.1/pkg/tool/linux_amd64"
-GCCGO="gccgo"
-CC="gcc"
-GOGCCFLAGS="-fPIC -m64 -pthread -fmessage-length=0 -fdebug-prefix-map=/tmp/go-build699913681=/tmp/go-build -gno-record-gcc-switches"
-CXX="g++"
-CGO_ENABLED="1"
-PKG_CONFIG="pkg-config"
-CGO_CFLAGS="-g -O2"
-CGO_CPPFLAGS=""
-CGO_CXXFLAGS="-g -O2"
-CGO_FFLAGS="-g -O2"
-CGO_LDFLAGS="-g -O2"
+The above code, when executed, will print `woof!` on two lines. The
+first line is the result of the dog Copper barking, and the second
+line is his friend Todd the fox taking a turn. However, what makes
+Copper a dog or Todd a fox? According to the code it's because
+`copper` implements the function `bark() string` from the `dog`
+interface and `todd` implements the same function from the `fox`
+interface.
+
+Does that mean that `copper` and `todd` are interchangeable? In fact,
+the two friends decided to pretend to be one another in order to play a
+trick on the kind old lady and hunter
+([run example](https://play.golang.org/p/LDNCODWctg)):
+
+```go
+func main() {
+	var d dog = &todd{}
+	var f fox = &copper{}
+	barkWithDog(f)
+	barkWithFox(d)
+}
 ```
 
-### Download
-On a Linux host use `go get` to fetch this project:
+How can Todd be a fox and Copper a dog? According to Go's interface
+rules, a variable of type `fox` can be assigned any type that
+implements the `bark() string` function. A function that has an
+argument of type `dog` or `fox` can also accept any type that implements
+the `bark() string` function, even if that type is another interface.
 
-```bash
-$ go get github.com/akutz/gpd
+It would appear then that multiple Go interfaces, if they define the same
+abstraction, are identical. However, thanks to Go's strong type
+system, interfaces are not as interchangeable as they first appear:
+([run example](https://play.golang.org/p/RT3X1Ot2WS)):
+
+```go
+package main
+
+import (
+	"fmt"
+)
+
+type dog interface {
+	bark() string
+	same(d dog) bool
+}
+
+type fox interface {
+	bark() string
+	same(f fox) bool
+}
+
+type copper struct{}
+
+func (c *copper) bark() string    { return "woof!" }
+func (c *copper) same(d dog) bool { return c == d }
+
+type todd struct{}
+
+func (t *todd) bark() string    { return "woof!" }
+func (t *todd) same(f fox) bool { return t == f }
+
+func barkWithDog(d dog) { fmt.Println(d.bark()) }
+func barkWithFox(f fox) { fmt.Println(f.bark()) }
+
+func main() {
+	var d dog = &todd{}
+	var f fox = &copper{}
+	barkWithDog(f)
+	barkWithFox(d)
+}
 ```
 
-### Run the program
-The root of the project is a Go command-line program. Running it
-will emit a message to the console:
+The above example will no longer emit the sound of two friends barking,
+but rather the following errors:
 
 ```bash
-$ go run main.go
-Yes, we have no bananas,
-We have no bananas today.
+tmp/sandbox006620983/main.go:31: cannot use todd literal (type *todd) as type dog in assignment:
+	*todd does not implement dog (wrong type for same method)
+		have same(fox) bool
+		want same(dog) bool
+tmp/sandbox006620983/main.go:32: cannot use copper literal (type *copper) as type fox in assignment:
+	*copper does not implement fox (wrong type for same method)
+		have same(dog) bool
+		want same(fox) bool
+tmp/sandbox006620983/main.go:33: cannot use f (type fox) as type dog in argument to barkWithDog:
+	fox does not implement dog (wrong type for same method)
+		have same(fox) bool
+		want same(dog) bool
+tmp/sandbox006620983/main.go:34: cannot use d (type dog) as type fox in argument to barkWithFox:
+	dog does not implement fox (wrong type for same method)
+		have same(dog) bool
+		want same(fox) bool
 ```
 
-### Build the plug-in
-If the program is run with a single argument it is treated as the
-path to a Go plug-in. That plug-in is loaded and will emit a different
-message to the console. First, build the plug-in:
+The relevant piece of information from the above error text is the following:
 
 ```bash
-$ go build -buildmode plugin -o mod.so ./mod
+have same(fox) bool
+want same(dog) bool
 ```
 
-To verify that the produced file *is* a plug-in, use the `file` command:
+In other words, even though Go interfaces `A` and `B` are identical, `A{A}` and
+`B{B}` are not. If `A`==`B` and `C`==`D`, `A{C}` != `B{D}`.
+
+Because of this rule, without a shared types library, even with Go interfaces,
+it's not possible for Go plug-ins to expect to share or use symbols provided
+by the host process.
+
+### Fully-Qualified Package Path
+However, even redefining interfaces inside plug-ins to match types found in
+the host process will fail if those interfaces are used by exported symbols.
+
+#### Curious Exception
+There is one curious exception to this rule: when an interface is defined
+in the `main` package of the host program as well as the `main` package of
+the plug-in.
+
+This project's `dog` package can be used to demonstrate this exception. On
+a Linux host using Go 1.8+, get the `dog` package:
 
 ```bash
-$ file mod.so
-mod.so: ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[sha1]=8c78f9a393bd083bde91b2b34b8117592387f40e, not stripped
+$ go get github.com/akutz/gpd && \
+  cd $GOPATH/src/github.com/akutz/gpd && \
+  git checkout isomod && \
+  cd dog
 ```
 
-The file is reported as a *shared object*, verifying that it is indeed a
-Go plug-in.
-
-### Run the program with the plug-in
-Run the program using the plug-in:
+Build the plug-in `sit.so`:
 
 ```bash
-$ go run main.go mod.so
-Yes there were thirty, thousand, pounds...
-Of...bananas.
+$ go build -buildmode plugin -o sit.so ./sit
 ```
 
-It works!
-
-### Vendor the shared `dep` package
-However, what happens when the program vendors the shared `dep` package?
+Run the program using the `sit.so` plugin:
 
 ```bash
-$ mkdir -p vendor/github.com/akutz/gpd && cp -r dep vendor/github.com/akutz/gpd
-$ go run main.go mod.so
-error: failed to load plugin: plugin.Open: plugin was built with a different version of package github.com/akutz/gpd/lib
-panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x504c45]
+$ go run main.go dog.go sit.so
+Lucy
+```
+
+The program should have printed the name "Lucy". However, if the code
+is examined, the `Dog` interface is defined in both the host program
+**and** in the plug-in package. Yet it works. Why? The answer is
+almost so embarrassingly obvious that it makes this author hesitant to
+admit it took him an hour of looking at the problem to figure it out.
+
+Both interfaces have a fully-qualified package path of `main.Dog`.
+
+When interfaces are defined in the `main` package of the hosting
+program and in the `main` package of a plug-in, their symbols are
+identical. However, like most things, there's an exception to even this.
+
+#### Exception to the Exception
+What happens if the `Dog` interface references itself? The answer is an
+error this author has never seen before in his history of working with
+the Go programming language. To reproduce this error, rebuild the `sit`
+plug-in using the build tag `self`. This causes the `Dog` interface to
+include a new function: `Self() Dog`:
+
+```bash
+$ go build -tags self -buildmode plugin -o sit_self.so ./sit
+```
+
+Now run the program using the same build tag. This also causes the
+host program's `Dog` interface to include the function `Self() Dog`.
+Run the program using the build tag `self` and plug-in file `sit_self.so`:
+
+```bash
+$ go run main.go self.go sit.so
+runtime: goroutine stack exceeds 1000000000-byte limit
+fatal error: stack overflow
+
+runtime stack:
+runtime.throw(0x534aad, 0xe)
+	/home/akutz/.go/1.8.1/src/runtime/panic.go:596 +0x95
+runtime.newstack(0x0)
+	/home/akutz/.go/1.8.1/src/runtime/stack.go:1089 +0x3f2
+runtime.morestack()
+	/home/akutz/.go/1.8.1/src/runtime/asm_amd64.s:398 +0x86
 
 goroutine 1 [running]:
-github.com/akutz/gpd/lib.NewModule(0x535498, 0x6, 0x539cb5, 0x21)
-	/home/akutz/go/src/github.com/akutz/gpd/lib/lib.go:28 +0x55
-main.main()
-	/home/akutz/go/src/github.com/akutz/gpd/main.go:32 +0x13a
+runtime.(*_type).string(0x7f2488279520, 0x0, 0x0)
+	/home/akutz/.go/1.8.1/src/runtime/type.go:45 +0xad fp=0xc44009c358 sp=0xc44009c350
+runtime.typesEqual(0x7f2488279520, 0x51d0c0, 0x50a310)
+	/home/akutz/.go/1.8.1/src/runtime/type.go:543 +0x73 fp=0xc44009c480 sp=0xc44009c358
+runtime.typesEqual(0x7f2488270740, 0x5137c0, 0x5137c0)
+	/home/akutz/.go/1.8.1/src/runtime/type.go:586 +0x368 fp=0xc44009c5a8 sp=0xc44009c480
+runtime.typesEqual(0x7f2488279520, 0x51d0c0, 0x50a310)
+	/home/akutz/.go/1.8.1/src/runtime/type.go:615 +0x740 fp=0xc44009c6d0 sp=0xc44009c5a8
+...additional frames elided...
+
+goroutine 17 [syscall, locked to thread]:
+runtime.goexit()
+	/home/akutz/.go/1.8.1/src/runtime/asm_amd64.s:2197 +0x1
 exit status 2
 ```
 
-The program fails!
-
-This is because the `dep` package includes a type that
-is used by both the shared `lib` package and the plug-in package, `mod`.
-
-The plug-in linked against the `lib` package at `github.com/akutz/gpd/lib`
-which itself linked against the `dep` package at `github.com/akutz/gpd/dep`.
-
-However, vendoring the `dep` package for the program causes the `lib`
-package as compiled into the program to link against
-`github.com/akutz/gpd/vendor/github.com/akutz/gpd/dep`, resulting in
-the program and the plug-in having two different versions of the `lib`
-package!
-
-### Vendor the shared `lib` package
-However, what happens when the program vendors the shared `lib` package?
-
-```bash
-$ rm -fr vendor
-$ mkdir -p vendor/github.com/akutz/gpd && cp -r lib vendor/github.com/akutz/gpd
-$ go run main.go mod.so
-panic: runtime error: invalid memory address or nil pointer dereference
-[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x504d65]
-
-goroutine 1 [running]:
-github.com/akutz/gpd/vendor/github.com/akutz/gpd/lib.NewModule(0x5355b8, 0x6, 0xc42000c2c0, 0x0)
-	/home/akutz/go/src/github.com/akutz/gpd/vendor/github.com/akutz/gpd/lib/lib.go:28 +0x55
-main.main()
-	/home/akutz/go/src/github.com/akutz/gpd/main.go:32 +0x13a
-exit status 2
-```
-
-The program fails! This is because the `lib` package contains a type
-registry that can be used to both register types and construct new
-instances of those types.
-
-However, because the program's type registry is located in the package
-`github.com/akutz/gpd/vendor/github.com/akutz/gpd/lib` and the plug-in
-registered its type with `github.com/akutz/gpd/lib`, when the program
-requests a new object for the type `mod_go`, a nil exception occurs
-because the program and plug-in were accessing two different type
-registries!
-
-## The Hack
-At the moment the only solution available is to create a build
-toolchain using a list of transitive dependencies generated from
-the application that is responsible for loading the plug-ins. This
-list of dependencies can be used to create a custom `GOPATH` against
-which any projects participating in the application must be built,
-including the application itself, any shared libraries, and the
-plug-ins.
-
-## The Solution
-Is there one? Two possible solutions are:
-
-1. Allow a `src` directory at the root of a `vendor` directory so that
-plug-ins can be built directly against a program's `vendor` directory.
-Today that would require a bind mount.
-2. Allow plug-ins to link directly against the Go program binary that
-will load the programs.
-
-Hopefully the Golang team can solve this issue as it really does prevent
-Go plug-ins from being useful in a world where applications are often
-required to vendor dependencies.
+The above program fails due to a Go runtime panic where Go is recursively trying
+to determine if the `main.Dog` interface from the host program is the same
+type as the `main.Dog` interface defined in the plug-in. The interfaces were
+considered the same when they did not reference themselves with their respective
+`Self() Dog` functions.
